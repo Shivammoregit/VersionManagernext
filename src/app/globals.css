@@ -18,8 +18,8 @@
     --breaking: #dc2626;
     
     /* Fonts loaded from layout.js */
-    --font-main: var(--font-plex-sans), sans-serif;
-    --font-mono: var(--font-plex-mono), monospace;
+    --font-main: sans-serif;
+    --font-mono: monospace;
 }
 
 body {
