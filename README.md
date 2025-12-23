@@ -8,7 +8,8 @@ A full-stack version management dashboard built with Next.js and MongoDB.
 ## Setup
 **Install Dependencies**
    ```bash
-   npm install```
+   npm install
+```
 >
 > - **Tech Stack:** **Next.js**.
 > - **Architecture:** It is a single full-stack application (Frontend + API in one project).
