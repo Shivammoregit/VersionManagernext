@@ -138,7 +138,7 @@ h1 {
     transition: all 0.15s ease;
 }
 
-.btn:hover { background: var(--bg); }
+.btn:hover { scale: calc(1.01); }
 
 .btn-primary {
     background: var(--text);
