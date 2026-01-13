@@ -1,0 +1,54 @@
+name: Version Manager Deployment
+
+on:
+  push:
+    branches: ["develop"]
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          key: ${{ secrets.SSH_DEV_KEY }}
+          host: ${{ secrets.SSH_DEV_HOST }}
+          port: ${{ secrets.SSH_DEV_PORT }}
+          username: ${{ secrets.SSH_DEV_USER }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export PATH="$PATH:/usr/bin"
+
+            cd "${{ secrets.APP_DEV_DIR }}"
+
+            echo "========================================"
+            echo "=======[ PULLING LATEST CHANGES ]======="
+            echo "========================================"
+
+            git fetch origin
+            git reset --hard origin/develop
+
+            echo "========================================"
+            echo "=======[ BUILDING DOCKER IMAGE ]========"
+            echo "========================================"
+
+            APP_NAME="${{ secrets.APP_DEV_NAME }}"
+
+            docker rm -f "$APP_NAME" || true
+
+            docker rmi "$APP_NAME" || true
+
+            docker build -t "$APP_NAME" .
+
+            echo "========================================"
+            echo "======[ RUNNING DOCKER CONTAINER ]======"
+            echo "========================================"
+
+            docker run -d --add-host=host.docker.internal:host-gateway --env-file .env.development -p 3000:3000 --name "$APP_NAME" "$APP_NAME"
+
+            echo "========================================"
+            echo "========[ DEPLOYMENT COMPLETE ]========="
+            echo "========================================"

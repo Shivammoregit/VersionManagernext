@@ -1,0 +1,12 @@
+services:
+  versions:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: versions
+    container_name: versions
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
