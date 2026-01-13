@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Next.js build output
+.next
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Environment files (handled via docker-compose)
+.env*.local
+
+# Misc
+*.md
+Dockerfile*
+docker-compose*
