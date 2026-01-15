@@ -10,6 +10,14 @@ const APP_DEFS = {
     'android-partner': { name: 'Partner App', platform: 'android', type: 'Partner', buildPrefix: 203 }
 };
 
+// App Store / Play Store IDs for auto-fetch
+const APP_FETCH_CONFIG = {
+    'ios-parent': { endpoint: '/api/appstore/6756305494' },      // PetYosa iOS
+    'ios-partner': { endpoint: '/api/appstore/6756630090' },     // VetYosa iOS
+    'android-parent': { endpoint: '/api/playstore/com.petyosa.petapp' },  // PetYosa Android 
+    'android-partner': { endpoint: '/api/playstore/com.petyosa.vetapp' }  // VetYosa Android
+};
+
 // Calculate build number from version string
 // Formula: prefix*1000 + MAJOR*1000 + MINOR*10 + PATCH
 // PetApp (Parent): prefix 102 → e.g., 2.2.1 → 102000 + 2000 + 20 + 1 = 104021
@@ -17,13 +25,13 @@ const APP_DEFS = {
 const calculateBuildNumber = (version, appId) => {
     if (!version || !appId) return '';
 
-    // Parse version string (e.g., "2.2.1" or "capacitor-2.2.1")
-    const versionMatch = version.match(/(\d+)\.(\d+)\.(\d+)/);
+    // Parse version string (e.g., "2.2.1", "6.0", or "capacitor-2.2.1")
+    const versionMatch = version.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
     if (!versionMatch) return '';
 
     const major = parseInt(versionMatch[1], 10);
     const minor = parseInt(versionMatch[2], 10);
-    const patch = parseInt(versionMatch[3], 10);
+    const patch = parseInt(versionMatch[3] || '0', 10);
 
     const prefix = APP_DEFS[appId]?.buildPrefix || 102;
 
@@ -44,6 +52,9 @@ export default function Home() {
     const [appsData, setAppsData] = useState({});
     const [loading, setLoading] = useState(false);
     const [toast, setToast] = useState(null);
+    const [fetchingVersion, setFetchingVersion] = useState(false);
+    const [storeVersions, setStoreVersions] = useState({});
+    const [isFetchingAll, setIsFetchingAll] = useState(false);
 
     // Modal States
     const [showAddModal, setShowAddModal] = useState(false);
@@ -204,6 +215,169 @@ export default function Home() {
         }
     };
 
+    // Fetch latest version from App Store / Play Store
+    const fetchLatestVersion = async () => {
+        const fetchConfig = APP_FETCH_CONFIG[formData.appId];
+
+        if (!fetchConfig || !fetchConfig.endpoint) {
+            showToast('Auto-fetch not available for this app', 'error');
+            return;
+        }
+
+        setFetchingVersion(true);
+        try {
+            const res = await fetch(fetchConfig.endpoint);
+            const data = await res.json();
+
+            if (data.success && data.data?.version) {
+                const version = data.data.version;
+                const build = calculateBuildNumber(version, formData.appId);
+                setFormData({ ...formData, version, build });
+                showToast(`Fetched v${version}`, 'success');
+            } else {
+                showToast(data.error?.message || 'Could not fetch version', 'error');
+            }
+        } catch (err) {
+            showToast('Fetch failed - enter manually', 'error');
+        } finally {
+            setFetchingVersion(false);
+        }
+    };
+
+    // Fetch all latest versions for all apps and auto-sync to DB
+    const fetchAllVersions = async () => {
+        setIsFetchingAll(true);
+        const results = {};
+
+        try {
+            const fetchPromises = Object.entries(APP_FETCH_CONFIG)
+                .filter(([_, config]) => config.endpoint)
+                .map(async ([appId, config]) => {
+                    try {
+                        const res = await fetch(config.endpoint);
+                        const data = await res.json();
+                        if (data.success && data.data?.version) {
+                            return { appId, version: data.data.version };
+                        }
+                    } catch (e) {
+                        console.error(`Failed to fetch version for ${appId}`, e);
+                    }
+                    return { appId, version: null };
+                });
+
+            const settledResults = await Promise.allSettled(fetchPromises);
+
+            settledResults.forEach(result => {
+                if (result.status === 'fulfilled' && result.value.version) {
+                    results[result.value.appId] = result.value.version;
+                }
+            });
+
+            setStoreVersions(results);
+
+            const fetchedCount = Object.keys(results).length;
+            if (fetchedCount === 0) {
+                showToast('Could not fetch versions from stores', 'error');
+                return;
+            }
+
+            const appsToSync = Object.entries(results).filter(([appId, storeV]) => {
+                const currentV = appsData[appId]?.production?.version;
+                return storeV && storeV !== 'Unknown' && storeV !== currentV;
+            });
+
+            if (appsToSync.length === 0) {
+                showToast('All apps are already in sync', 'info');
+                return;
+            }
+
+            setLoading(true);
+            showToast(`Fetched ${fetchedCount} store versions. Syncing ${appsToSync.length}...`, 'info');
+
+            let successCount = 0;
+            for (const [appId, version] of appsToSync) {
+                const success = await syncVersion(appId, version);
+                if (success) successCount++;
+            }
+
+            if (successCount === appsToSync.length) {
+                showToast(`Synced ${successCount} apps successfully!`, 'success');
+                loadData();
+                setStoreVersions({});
+            } else if (successCount > 0) {
+                showToast(`Synced ${successCount}/${appsToSync.length} apps. Some failed.`, 'error');
+                loadData();
+                // keep storeVersions so user can see mismatches
+            } else {
+                showToast('Sync failed', 'error');
+            }
+        } finally {
+            setLoading(false);
+            setIsFetchingAll(false);
+        }
+    };
+
+    // Sync a specific app version to the database
+    const syncVersion = async (appId, version) => {
+        if (!appId || !version || version === 'Unknown') return false;
+
+        const build = calculateBuildNumber(version, appId);
+        try {
+            const res = await fetch('/api/releases', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    app_id: appId,
+                    version,
+                    build,
+                    environment: 'production',
+                    notes: 'Auto-synced from Store',
+                    is_breaking: false
+                })
+            });
+
+            if (res.ok) {
+                return true;
+            } else {
+                console.error(`Failed to sync ${appId}`);
+                return false;
+            }
+        } catch (err) {
+            console.error(`Sync error for ${appId}`, err);
+            return false;
+        }
+    };
+
+    // Sync all apps that have a different store version
+    const syncAll = async () => {
+        const appsToSync = Object.entries(storeVersions).filter(([appId, storeV]) => {
+            const currentV = appsData[appId]?.production?.version;
+            return storeV && storeV !== 'Unknown' && storeV !== currentV;
+        });
+
+        if (appsToSync.length === 0) {
+            showToast('All apps are already in sync', 'info');
+            return;
+        }
+
+        setLoading(true);
+        let successCount = 0;
+
+        for (const [appId, version] of appsToSync) {
+            const success = await syncVersion(appId, version);
+            if (success) successCount++;
+        }
+
+        if (successCount > 0) {
+            showToast(`Synced ${successCount} apps successfully!`, 'success');
+            loadData(); // Refresh appsData
+            setStoreVersions({}); // Clear store versions to hide badges
+        } else {
+            showToast('Sync failed', 'error');
+        }
+        setLoading(false);
+    };
+
     if (!isAuthenticated) {
         return <AuthScreen onLogin={() => { setIsAuthenticated(true); loadData(); }} />;
     }
@@ -234,6 +408,7 @@ export default function Home() {
                         <div className="app-grid">
                             {Object.entries(appsData).map(([id, app]) => (
                                 <AppCard key={id} id={id} app={app}
+                                    storeVersion={storeVersions[id]}
                                     onEdit={(env) => {
                                         const v = app[env];
                                         const build = calculateBuildNumber(v.version !== '—' ? v.version : '', id);
@@ -256,11 +431,28 @@ export default function Home() {
                             ))}
                         </div>
                     )}
-                    <div className="add-release-container">
-                        <button className="btn btn-primary btn-full" onClick={() => {
+                    <div className="add-release-container" style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
+                        <button className="btn btn-primary" style={{ flex: '1 1 200px' }} onClick={() => {
                             prefillFormData('ios-parent', 'production');
                             setShowAddModal(true);
                         }}>+ Add Release</button>
+                        <button
+                            className={`btn ${isFetchingAll ? 'loading' : ''}`}
+                            style={{ flex: '1 1 150px', backgroundColor: '#000', color: '#fff' }}
+                            onClick={fetchAllVersions}
+                            disabled={isFetchingAll}
+                        >
+                            {isFetchingAll ? 'Fetching...' : 'Fetch & Sync'}
+                        </button>
+                        {Object.keys(storeVersions).some(id => storeVersions[id] && storeVersions[id] !== 'Unknown' && storeVersions[id] !== appsData[id]?.production?.version) && (
+                            <button
+                                className="btn"
+                                style={{ flex: '1 1 100%', backgroundColor: '#059669', color: '#fff', borderColor: '#059669' }}
+                                onClick={syncAll}
+                            >
+                                Sync All with Store
+                            </button>
+                        )}
                     </div>
                 </div>
             )}
@@ -307,16 +499,28 @@ export default function Home() {
                             <div className="form-row">
                                 <div className="form-group">
                                     <label className="form-label">Version</label>
-                                    <input
-                                        className="form-input"
-                                        value={formData.version}
-                                        placeholder="e.g., 2.2.1"
-                                        onChange={e => {
-                                            const newVersion = e.target.value;
-                                            const newBuild = calculateBuildNumber(newVersion, formData.appId);
-                                            setFormData({ ...formData, version: newVersion, build: newBuild });
-                                        }}
-                                    />
+                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                        <input
+                                            className="form-input"
+                                            value={formData.version}
+                                            placeholder="e.g., 2.2.1"
+                                            style={{ flex: 1 }}
+                                            onChange={e => {
+                                                const newVersion = e.target.value;
+                                                const newBuild = calculateBuildNumber(newVersion, formData.appId);
+                                                setFormData({ ...formData, version: newVersion, build: newBuild });
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="btn btn-sm"
+                                            onClick={fetchLatestVersion}
+                                            disabled={fetchingVersion || !APP_FETCH_CONFIG[formData.appId]?.endpoint}
+                                            style={{ whiteSpace: 'nowrap' }}
+                                        >
+                                            {fetchingVersion ? '...' : '↓ Fetch'}
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="form-group">
                                     <label className="form-label">Build <span style={{ fontSize: '10px', color: '#737373' }}>(auto)</span></label>
@@ -413,28 +617,38 @@ function AuthScreen({ onLogin }) {
     );
 }
 
-function AppCard({ id, app, onEdit, onNotes }) {
+function AppCard({ id, app, onEdit, onNotes, storeVersion }) {
     return (
         <div className="app-card">
             <div className="app-header">
                 <span className={`platform-dot ${app.platform}`}></span>
                 <span className="app-name">{app.platform.toUpperCase()} {app.name}</span>
+                {storeVersion && <span className="store-badge">Store: v{storeVersion}</span>}
             </div>
             <div className="versions">
-                <VersionBlock label="Prod" data={app.production} onEdit={() => onEdit('production')} onNotes={() => onNotes('production')} />
+                <VersionBlock
+                    label="Prod"
+                    data={app.production}
+                    onEdit={() => onEdit('production')}
+                    onNotes={() => onNotes('production')}
+                    storeVersion={storeVersion} // Pass storeVersion to compare with prod
+                />
                 <VersionBlock label="Dev" data={app.development} onEdit={() => onEdit('development')} onNotes={() => onNotes('development')} />
             </div>
         </div>
     );
 }
 
-function VersionBlock({ label, data, onEdit, onNotes }) {
+function VersionBlock({ label, data, onEdit, onNotes, storeVersion }) {
+    const isNewerInStore = storeVersion && data.version !== '—' && storeVersion !== data.version;
+
     return (
-        <div className="version-block">
+        <div className={`version-block ${isNewerInStore ? 'has-update' : ''}`}>
             <label>{label}</label>
             <div className="version-number">
                 {data.version}
                 {data.breaking && <span className="badge breaking">!</span>}
+                {isNewerInStore && <span className="update-marker" title={`Store version ${storeVersion} is different`}>↑</span>}
             </div>
             <div className="version-meta">{data.build} {data.date && `· ${formatDate(data.date)}`}</div>
             <div className="version-actions">
