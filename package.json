@@ -2,21 +2,31 @@
   "name": "version-manager-next",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "watch:playstore:example": "node scripts/playstore-watcher.mjs --config config/playstore-apps.example.json --state data/playstore-state.json --once",
+    "watch:playstore": "node scripts/playstore-watcher.mjs --config config/playstore-apps.json --state data/playstore-state.json --once",
+    "watch:playstore:loop": "node scripts/playstore-watcher.mjs --config config/playstore-apps.json --state data/playstore-state.json --interval-minutes 30"
   },
   "dependencies": {
+    "google-play-scraper": "^9.2.0",
     "mongodb": "^7.0.0",
     "next": "16.1.1",
+    "puppeteer-core": "^24.35.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "devDependencies": {
     "babel-plugin-react-compiler": "1.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.1.1"
+    "eslint-config-next": "16.1.1",
+    "jest": "^29.7.0"
   }
 }

@@ -1,0 +1,8 @@
+{
+  "country": "us",
+  "language": "en",
+  "apps": [
+    { "name": "PetYosa", "packageName": "com.petyosa.petapp" },
+    { "name": "VetYosa", "packageName": "com.petyosa.vetapp" }
+  ]
+}
