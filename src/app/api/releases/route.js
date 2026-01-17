@@ -31,15 +31,21 @@ export async function POST(request) {
         const existing = await db.collection('releases').findOne({ app_id, environment });
         
         if (existing) {
+            const shouldBumpReleaseDate = existing.version !== version || existing.build !== build;
+
+            const updateDoc = {
+                version,
+                build,
+                notes: notes || '',
+                is_breaking: is_breaking || false,
+                ...(shouldBumpReleaseDate ? { released_at: new Date() } : {}),
+            };
+
             await db.collection('releases').updateOne(
                 { _id: existing._id },
                 { 
                     $set: { 
-                        version, 
-                        build, 
-                        notes: notes || '', 
-                        is_breaking: is_breaking || false,
-                        released_at: new Date()
+                        ...updateDoc,
                     } 
                 }
             );

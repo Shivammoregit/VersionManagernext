@@ -33,6 +33,7 @@ const ITUNES_API_URL = 'https://itunes.apple.com';
  * @property {string} appId - iTunes app ID
  * @property {string} title - App name
  * @property {string} developer - Developer/seller name
+ * @property {string|null} whatsNew - "What's New" / release notes for current version
  * @property {string|null} releaseDate - Release date (ISO string)
  * @property {string|null} currentVersionReleaseDate - Current version release date
  * @property {string} fetchedAt - When this data was fetched
@@ -157,6 +158,7 @@ export class AppStoreScraper {
                 appId: String(app.trackId),
                 title: app.trackName,
                 developer: app.sellerName || app.artistName,
+                whatsNew: app.releaseNotes || null,
                 releaseDate: app.releaseDate || null,
                 currentVersionReleaseDate: app.currentVersionReleaseDate || null,
                 minimumOsVersion: app.minimumOsVersion,

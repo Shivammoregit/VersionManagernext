@@ -51,6 +51,26 @@ Examples:
 - Windows Task Scheduler (PowerShell action):
   - `powershell -NoProfile -Command "Invoke-RestMethod 'https://YOUR_DOMAIN/api/sync/playstore?key=YOUR_KEY' | Out-Null"`
 
+## App Store Auto-Sync (iOS)
+
+This project fetches App Store versions (and "What's New"/release notes) for:
+- PetYosa iOS: `6756305494`
+- VetYosa iOS: `6756630090`
+
+**Fetch only (no DB write):**
+- `GET /api/appstore/{appId}`
+
+**Sync into MongoDB (updates `releases` production, including `notes`):**
+- `GET /api/sync/appstore`
+- `POST /api/sync/appstore`
+
+If `APPSTORE_API_KEY` is set, you must provide it either:
+- As a header: `x-api-key: YOUR_KEY` (or the header name set in `APPSTORE_API_KEY_HEADER`)
+- Or as a query param: `?key=...` (useful for cron)
+
+Example:
+- `GET /api/sync/appstore?key=YOUR_KEY`
+
 ## Play Store Version Watcher (Scraping-Only)
 
 This is a standalone script that scrapes the Play Store **Version** field for configured Android apps and logs when it changes.

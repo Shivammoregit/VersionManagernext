@@ -31,6 +31,7 @@ import { logger } from '@/lib/playstore/logger';
  *     "version": "11.58.0",
  *     "lastUpdated": "2024-01-10T00:00:00.000Z",
  *     "fetchedAt": "2024-01-12T09:51:10.000Z",
+ *     "whatsNew": "Bug fixes and performance improvements.",
  *     "fromCache": false
  *   }
  * }

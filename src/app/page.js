@@ -55,11 +55,17 @@ export default function Home() {
     const [fetchingVersion, setFetchingVersion] = useState(false);
     const [storeVersions, setStoreVersions] = useState({});
     const [isFetchingAll, setIsFetchingAll] = useState(false);
+    const [showStoreReview, setShowStoreReview] = useState(false);
+    const [syncSelection, setSyncSelection] = useState({});
+    const [isSyncingSelected, setIsSyncingSelected] = useState(false);
+    const [syncResults, setSyncResults] = useState([]);
 
     // Modal States
     const [showAddModal, setShowAddModal] = useState(false);
     const [showNotesModal, setShowNotesModal] = useState(false);
     const [modalData, setModalData] = useState(null);
+    const [showNotesDiffModal, setShowNotesDiffModal] = useState(false);
+    const [notesDiffData, setNotesDiffData] = useState(null);
 
     const [formData, setFormData] = useState({
         id: '',
@@ -71,6 +77,11 @@ export default function Home() {
         isBreaking: false,
         releaseDate: ''
     });
+
+    const openNotesModal = (title, content) => {
+        setModalData({ title, content });
+        setShowNotesModal(true);
+    };
 
     useEffect(() => {
         if (typeof window !== 'undefined' && sessionStorage.getItem('vm_auth') === 'true') {
@@ -114,6 +125,16 @@ export default function Home() {
             };
         });
         setAppsData(processed);
+    };
+
+    const normalizeNotes = (raw) => {
+        if (raw === undefined || raw === null) return '';
+        return String(raw).replace(/\r\n?/g, '\n').trim();
+    };
+
+    const notesLookLikeOpaqueToken = (raw) => {
+        const s = normalizeNotes(raw);
+        return s && !/\s/.test(s) && /^[A-Za-z0-9+/_=-]{60,}$/.test(s);
     };
 
     // Helper to get existing release data for an app/environment
@@ -232,7 +253,8 @@ export default function Home() {
             if (data.success && data.data?.version) {
                 const version = data.data.version;
                 const build = calculateBuildNumber(version, formData.appId);
-                setFormData({ ...formData, version, build });
+                const whatsNew = typeof data.data.whatsNew === 'string' ? data.data.whatsNew.trim() : '';
+                setFormData({ ...formData, version, build, ...(whatsNew ? { notes: whatsNew } : {}) });
                 showToast(`Fetched v${version}`, 'success');
             } else {
                 showToast(data.error?.message || 'Could not fetch version', 'error');
@@ -244,85 +266,157 @@ export default function Home() {
         }
     };
 
-    // Fetch all latest versions for all apps and auto-sync to DB
+    const fetchStoreInfoForApp = async (endpoint) => {
+        try {
+            const res = await fetch(endpoint);
+            const data = await res.json();
+            if (data.success && data.data?.version) {
+                return {
+                    version: data.data.version,
+                    whatsNew: data.data.whatsNew || null,
+                    fromCache: !!data.data.fromCache,
+                    fetchedAt: data.data.fetchedAt || null,
+                    error: null,
+                };
+            }
+            return { version: null, whatsNew: null, fromCache: false, fetchedAt: null, error: data.error?.message || 'Could not fetch version' };
+        } catch (e) {
+            return { version: null, whatsNew: null, fromCache: false, fetchedAt: null, error: e?.message || String(e) };
+        }
+    };
+
+    const getStoreReviewItem = (appId, storeInfo) => {
+        const currentRelease = appsData[appId]?.production;
+        const currentVersion = currentRelease?.version;
+        const currentNotes = normalizeNotes(currentRelease?.notes);
+
+        const storeVersion = storeInfo?.version;
+        const storeNotes = normalizeNotes(storeInfo?.whatsNew);
+
+        const fetchError = storeInfo?.error ? String(storeInfo.error) : '';
+        const hasStoreVersion = !!storeVersion && storeVersion !== 'Unknown';
+        const hasCurrentVersion = !!currentVersion && currentVersion !== 'â€”';
+        const isMissingInDb = !hasCurrentVersion;
+
+        const versionDiff = hasStoreVersion && hasCurrentVersion && storeVersion !== currentVersion;
+        const notesDiff = !!storeNotes && storeNotes !== currentNotes;
+
+        const canSync = !fetchError && hasStoreVersion;
+        const shouldSync = canSync && (isMissingInDb || versionDiff || notesDiff);
+
+        return {
+            appId,
+            appName: `${APP_DEFS[appId]?.platform?.toUpperCase()} ${APP_DEFS[appId]?.name}`,
+            fetchError,
+            currentVersion: hasCurrentVersion ? currentVersion : '',
+            storeVersion: hasStoreVersion ? storeVersion : '',
+            currentNotes,
+            storeNotes,
+            versionDiff,
+            notesDiff,
+            isMissingInDb,
+            selectable: canSync,
+            shouldSync,
+            fromCache: !!storeInfo?.fromCache,
+        };
+    };
+
+    const openNotesDiff = (appId) => {
+        const item = getStoreReviewItem(appId, storeVersions[appId] || null);
+        setNotesDiffData(item);
+        setShowNotesDiffModal(true);
+    };
+
+    const setSelectionForAllChanges = (checked) => {
+        const next = {};
+        Object.keys(APP_DEFS).forEach(appId => {
+            const item = getStoreReviewItem(appId, storeVersions[appId] || null);
+            next[appId] = checked ? item.shouldSync : false;
+        });
+        setSyncSelection(next);
+    };
+
+    // Fetch all latest versions for all apps (dry-run) and show review UI
     const fetchAllVersions = async () => {
         setIsFetchingAll(true);
-        const results = {};
+        setSyncResults([]);
 
         try {
-            const fetchPromises = Object.entries(APP_FETCH_CONFIG)
-                .filter(([_, config]) => config.endpoint)
-                .map(async ([appId, config]) => {
-                    try {
-                        const res = await fetch(config.endpoint);
-                        const data = await res.json();
-                        if (data.success && data.data?.version) {
-                            return { appId, version: data.data.version };
-                        }
-                    } catch (e) {
-                        console.error(`Failed to fetch version for ${appId}`, e);
-                    }
-                    return { appId, version: null };
-                });
+            const results = {};
+            const entries = Object.entries(APP_FETCH_CONFIG).filter(([_, config]) => config.endpoint);
 
-            const settledResults = await Promise.allSettled(fetchPromises);
-
-            settledResults.forEach(result => {
-                if (result.status === 'fulfilled' && result.value.version) {
-                    results[result.value.appId] = result.value.version;
-                }
-            });
+            await Promise.all(entries.map(async ([appId, config]) => {
+                results[appId] = await fetchStoreInfoForApp(config.endpoint);
+            }));
 
             setStoreVersions(results);
+            setShowStoreReview(true);
 
-            const fetchedCount = Object.keys(results).length;
-            if (fetchedCount === 0) {
-                showToast('Could not fetch versions from stores', 'error');
-                return;
-            }
+            const initialSelection = {};
+            let okCount = 0;
+            let changeCount = 0;
 
-            const appsToSync = Object.entries(results).filter(([appId, storeV]) => {
-                const currentV = appsData[appId]?.production?.version;
-                return storeV && storeV !== 'Unknown' && storeV !== currentV;
+            Object.keys(APP_DEFS).forEach(appId => {
+                const item = getStoreReviewItem(appId, results[appId] || null);
+                if (!item.fetchError && item.storeVersion) okCount++;
+                if (item.shouldSync) changeCount++;
+                initialSelection[appId] = item.shouldSync;
             });
 
-            if (appsToSync.length === 0) {
-                showToast('All apps are already in sync', 'info');
-                return;
-            }
-
-            setLoading(true);
-            showToast(`Fetched ${fetchedCount} store versions. Syncing ${appsToSync.length}...`, 'info');
-
-            let successCount = 0;
-            for (const [appId, version] of appsToSync) {
-                const success = await syncVersion(appId, version);
-                if (success) successCount++;
-            }
-
-            if (successCount === appsToSync.length) {
-                showToast(`Synced ${successCount} apps successfully!`, 'success');
-                loadData();
-                setStoreVersions({});
-            } else if (successCount > 0) {
-                showToast(`Synced ${successCount}/${appsToSync.length} apps. Some failed.`, 'error');
-                loadData();
-                // keep storeVersions so user can see mismatches
-            } else {
-                showToast('Sync failed', 'error');
-            }
+            setSyncSelection(initialSelection);
+            showToast(`Fetched store data for ${okCount}/${Object.keys(APP_DEFS).length}. Pending updates: ${changeCount}`, changeCount > 0 ? 'info' : 'success');
         } finally {
-            setLoading(false);
             setIsFetchingAll(false);
         }
     };
 
-    // Sync a specific app version to the database
-    const syncVersion = async (appId, version) => {
-        if (!appId || !version || version === 'Unknown') return false;
+    const retryFetchApp = async (appId) => {
+        const endpoint = APP_FETCH_CONFIG[appId]?.endpoint;
+        if (!endpoint) return;
+
+        const info = await fetchStoreInfoForApp(endpoint);
+        setStoreVersions(prev => ({ ...prev, [appId]: info }));
+
+        const item = getStoreReviewItem(appId, info);
+        setSyncSelection(prev => ({ ...prev, [appId]: item.shouldSync }));
+
+        if (item.fetchError) {
+            showToast(`Fetch failed for ${item.appName}`, 'error');
+        } else {
+            showToast(`Fetched ${item.appName}`, 'success');
+        }
+    };
+
+    const retryFailedFetches = async () => {
+        const failed = Object.keys(APP_DEFS).filter(appId => {
+            const err = storeVersions[appId]?.error;
+            return !!err;
+        });
+
+        if (failed.length === 0) {
+            showToast('No failed fetches to retry', 'info');
+            return;
+        }
+
+        for (const appId of failed) {
+            await retryFetchApp(appId);
+        }
+    };
+
+    // Sync a specific app to the database
+    const syncVersion = async (appId, storeInfo, currentRelease) => {
+        const version = storeInfo?.version;
+        let whatsNew = typeof storeInfo?.whatsNew === 'string' ? storeInfo.whatsNew.trim() : '';
+        if (notesLookLikeOpaqueToken(whatsNew)) whatsNew = '';
+        if (!appId || !version || version === 'Unknown') return { ok: false, action: 'error', error: 'Invalid store version' };
 
         const build = calculateBuildNumber(version, appId);
         try {
+            const currentNotes = normalizeNotes(currentRelease?.notes);
+            const action = (version === currentRelease?.version && whatsNew && normalizeNotes(whatsNew) !== currentNotes)
+                ? 'notes_updated'
+                : 'updated';
+
             const res = await fetch('/api/releases', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -331,56 +425,79 @@ export default function Home() {
                     version,
                     build,
                     environment: 'production',
-                    notes: 'Auto-synced from Store',
+                    notes: whatsNew || 'Auto-synced from Store',
                     is_breaking: false
                 })
             });
 
             if (res.ok) {
-                return true;
+                return { ok: true, action, error: null };
             } else {
                 console.error(`Failed to sync ${appId}`);
-                return false;
+                return { ok: false, action: 'error', error: `HTTP ${res.status}` };
             }
         } catch (err) {
             console.error(`Sync error for ${appId}`, err);
-            return false;
+            return { ok: false, action: 'error', error: err?.message || String(err) };
         }
     };
 
-    // Sync all apps that have a different store version
-    const syncAll = async () => {
-        const appsToSync = Object.entries(storeVersions).filter(([appId, storeV]) => {
-            const currentV = appsData[appId]?.production?.version;
-            return storeV && storeV !== 'Unknown' && storeV !== currentV;
+    const syncSelected = async (onlyFailed = false) => {
+        const reviewItems = Object.keys(APP_DEFS).map(appId => getStoreReviewItem(appId, storeVersions[appId] || null));
+
+        const toSync = reviewItems.filter(item => {
+            const selected = !!syncSelection[item.appId];
+            if (!selected) return false;
+            if (onlyFailed) {
+                const prev = syncResults.find(r => r.appId === item.appId);
+                return prev && !prev.ok;
+            }
+            return item.selectable;
         });
 
-        if (appsToSync.length === 0) {
-            showToast('All apps are already in sync', 'info');
+        if (toSync.length === 0) {
+            showToast(onlyFailed ? 'No failed apps to retry' : 'No selected changes to sync', 'info');
             return;
         }
 
+        setIsSyncingSelected(true);
         setLoading(true);
-        let successCount = 0;
 
-        for (const [appId, version] of appsToSync) {
-            const success = await syncVersion(appId, version);
-            if (success) successCount++;
-        }
+        try {
+            const results = [];
+            for (const item of toSync) {
+                const currentRelease = appsData[item.appId]?.production;
+                const storeInfo = storeVersions[item.appId];
+                const res = await syncVersion(item.appId, storeInfo, currentRelease);
+                results.push({ appId: item.appId, ok: !!res?.ok, action: res?.action || 'updated', error: res?.error || null });
+            }
 
-        if (successCount > 0) {
-            showToast(`Synced ${successCount} apps successfully!`, 'success');
-            loadData(); // Refresh appsData
-            setStoreVersions({}); // Clear store versions to hide badges
-        } else {
-            showToast('Sync failed', 'error');
+            setSyncResults(results);
+
+            const okCount = results.filter(r => r.ok).length;
+            const failCount = results.length - okCount;
+
+            if (failCount === 0) {
+                showToast(`Synced ${okCount} selected app(s)`, 'success');
+            } else if (okCount > 0) {
+                showToast(`Synced ${okCount}/${results.length}. Some failed.`, 'error');
+            } else {
+                showToast('Sync failed', 'error');
+            }
+
+            await loadData();
+        } finally {
+            setLoading(false);
+            setIsSyncingSelected(false);
         }
-        setLoading(false);
     };
 
     if (!isAuthenticated) {
         return <AuthScreen onLogin={() => { setIsAuthenticated(true); loadData(); }} />;
     }
+
+    const hasStoreSnapshot = Object.keys(storeVersions || {}).length > 0;
+    const selectedCount = Object.values(syncSelection || {}).filter(Boolean).length;
 
     return (
         <div className="container">
@@ -408,7 +525,7 @@ export default function Home() {
                         <div className="app-grid">
                             {Object.entries(appsData).map(([id, app]) => (
                                 <AppCard key={id} id={id} app={app}
-                                    storeVersion={storeVersions[id]}
+                                    storeInfo={storeVersions[id]}
                                     onEdit={(env) => {
                                         const v = app[env];
                                         const build = calculateBuildNumber(v.version !== '—' ? v.version : '', id);
@@ -424,8 +541,7 @@ export default function Home() {
                                         setShowAddModal(true);
                                     }}
                                     onNotes={(env) => {
-                                        setModalData({ title: `${app.name} (${env})`, content: app[env].notes });
-                                        setShowNotesModal(true);
+                                        openNotesModal(`${app.name} (${env})`, app[env].notes);
                                     }}
                                 />
                             ))}
@@ -442,18 +558,130 @@ export default function Home() {
                             onClick={fetchAllVersions}
                             disabled={isFetchingAll}
                         >
-                            {isFetchingAll ? 'Fetching...' : 'Fetch & Sync'}
+                            {isFetchingAll ? 'Fetching...' : 'Fetch Store Updates'}
                         </button>
-                        {Object.keys(storeVersions).some(id => storeVersions[id] && storeVersions[id] !== 'Unknown' && storeVersions[id] !== appsData[id]?.production?.version) && (
+                        {hasStoreSnapshot && (
                             <button
-                                className="btn"
-                                style={{ flex: '1 1 100%', backgroundColor: '#059669', color: '#fff', borderColor: '#059669' }}
-                                onClick={syncAll}
+                                className={`btn ${isSyncingSelected ? 'loading' : ''}`}
+                                style={{ flex: '1 1 150px', backgroundColor: '#059669', color: '#fff', borderColor: '#059669' }}
+                                onClick={() => syncSelected(false)}
+                                disabled={isSyncingSelected || selectedCount === 0}
+                                title={selectedCount === 0 ? 'Select apps to sync in the review panel' : ''}
                             >
-                                Sync All with Store
+                                {isSyncingSelected ? 'Syncing...' : `Sync Selected${selectedCount ? ` (${selectedCount})` : ''}`}
+                            </button>
+                        )}
+                        {hasStoreSnapshot && (
+                            <button className="btn" style={{ flex: '1 1 140px' }} onClick={() => setShowStoreReview(v => !v)}>
+                                {showStoreReview ? 'Hide Review' : 'Show Review'}
                             </button>
                         )}
                     </div>
+
+                    {showStoreReview && (
+                        <div className="store-review">
+                            <div className="store-review-header">
+                                <div>
+                                    <div className="store-review-title">Store Review (dry run)</div>
+                                    <div className="store-review-subtitle">Select changes to sync, then confirm.</div>
+                                </div>
+                                <div className="store-review-actions">
+                                    <button className="btn btn-sm" onClick={() => setSelectionForAllChanges(true)}>Select all changes</button>
+                                    <button className="btn btn-sm" onClick={() => setSelectionForAllChanges(false)}>Clear</button>
+                                    {Object.keys(APP_DEFS).some(appId => !!storeVersions[appId]?.error) && (
+                                        <button className="btn btn-sm" onClick={retryFailedFetches} disabled={isFetchingAll}>
+                                            Retry failed fetches
+                                        </button>
+                                    )}
+                                    <button
+                                        className={`btn btn-sm ${isSyncingSelected ? 'loading' : ''}`}
+                                        style={{ backgroundColor: '#059669', color: '#fff', borderColor: '#059669' }}
+                                        onClick={() => syncSelected(false)}
+                                        disabled={isSyncingSelected}
+                                    >
+                                        {isSyncingSelected ? 'Syncing...' : 'Sync Selected'}
+                                    </button>
+                                    {syncResults.some(r => !r.ok) && (
+                                        <button className="btn btn-sm" onClick={() => syncSelected(true)} disabled={isSyncingSelected}>
+                                            Retry Failed
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="store-review-list">
+                                {Object.keys(APP_DEFS).map(appId => {
+                                    const storeInfo = storeVersions[appId] || null;
+                                    const item = getStoreReviewItem(appId, storeInfo);
+                                    const selected = !!syncSelection[appId];
+
+                                    const status = item.fetchError
+                                        ? { label: 'Fetch failed', tone: 'error' }
+                                        : item.isMissingInDb
+                                            ? { label: 'New (not in DB)', tone: 'warn' }
+                                            : item.shouldSync
+                                                ? { label: item.versionDiff ? 'Version + Notes update' : 'Notes update', tone: 'warn' }
+                                                : { label: 'Up to date', tone: 'ok' };
+
+                                    const showBadTokenWarning = notesLookLikeOpaqueToken(storeInfo?.whatsNew);
+
+                                    return (
+                                        <div key={appId} className={`store-review-row tone-${status.tone}`}>
+                                            <div className="store-review-main">
+                                                <div className="store-review-app">
+                                                    <span className={`platform-dot ${APP_DEFS[appId]?.platform}`}></span>
+                                                    <span>{item.appName}</span>
+                                                    <span className="store-review-status">{status.label}{item.fromCache ? ' (cached)' : ''}</span>
+                                                </div>
+                                                <div className="store-review-meta">
+                                                    <div><span className="store-review-k">Current</span> {item.currentVersion || '—'}</div>
+                                                    <div><span className="store-review-k">Store</span> {item.storeVersion || '—'}</div>
+                                                </div>
+                                                {item.fetchError && <div className="store-review-error">{item.fetchError}</div>}
+                                                {showBadTokenWarning && <div className="store-review-error">Store notes looked like an opaque token and were ignored.</div>}
+                                            </div>
+
+                                            <div className="store-review-controls">
+                                                <label className="store-review-check">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selected}
+                                                        disabled={!item.selectable}
+                                                        onChange={(e) => setSyncSelection(prev => ({ ...prev, [appId]: e.target.checked }))}
+                                                    />
+                                                    <span>Include</span>
+                                                </label>
+                                                <div className="store-review-buttons">
+                                                    {item.fetchError && (
+                                                        <button className="btn btn-sm" onClick={() => retryFetchApp(appId)}>
+                                                            Retry fetch
+                                                        </button>
+                                                    )}
+                                                    <button className="btn btn-sm" onClick={() => openNotesDiff(appId)} disabled={!item.storeNotes && !item.currentNotes}>
+                                                        Notes diff
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {syncResults.length > 0 && (
+                                <div className="store-review-results">
+                                    <div className="store-review-title">Last Sync Run</div>
+                                    <div className="store-review-results-list">
+                                        {syncResults.map(r => (
+                                            <div key={r.appId} className={`store-review-result ${r.ok ? 'ok' : 'error'}`}>
+                                                <span>{APP_DEFS[r.appId]?.platform?.toUpperCase()} {APP_DEFS[r.appId]?.name}</span>
+                                                <span>{r.ok ? r.action : (r.error || 'error')}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -461,6 +689,7 @@ export default function Home() {
                 <HistoryList
                     releases={activeTab === 'breaking' ? releases.filter(r => r.is_breaking) : releases}
                     onDelete={handleDelete}
+                    onShowNotes={openNotesModal}
                 />
             )}
 
@@ -579,6 +808,30 @@ export default function Home() {
                 </div>
             )}
 
+            {/* Notes Diff Modal */}
+            {showNotesDiffModal && (
+                <div className="modal-overlay active" onClick={(e) => e.target === e.currentTarget && setShowNotesDiffModal(false)}>
+                    <div className="modal" style={{ maxWidth: '900px' }}>
+                        <div className="modal-header">
+                            <span className="modal-title">Notes Diff: {notesDiffData?.appName}</span>
+                            <button className="modal-close" onClick={() => setShowNotesDiffModal(false)}>&times;</button>
+                        </div>
+                        <div className="modal-body">
+                            <div className="notes-diff-grid">
+                                <div>
+                                    <div className="notes-diff-label">Current (production)</div>
+                                    <textarea className="form-textarea" readOnly value={notesDiffData?.currentNotes || ''} style={{ minHeight: '220px' }} />
+                                </div>
+                                <div>
+                                    <div className="notes-diff-label">Store</div>
+                                    <textarea className="form-textarea" readOnly value={notesDiffData?.storeNotes || ''} style={{ minHeight: '220px' }} />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
         </div>
     );
@@ -617,13 +870,13 @@ function AuthScreen({ onLogin }) {
     );
 }
 
-function AppCard({ id, app, onEdit, onNotes, storeVersion }) {
+function AppCard({ id, app, onEdit, onNotes, storeInfo }) {
     return (
         <div className="app-card">
             <div className="app-header">
                 <span className={`platform-dot ${app.platform}`}></span>
                 <span className="app-name">{app.platform.toUpperCase()} {app.name}</span>
-                {storeVersion && <span className="store-badge">Store: v{storeVersion}</span>}
+                {storeInfo?.version && <span className="store-badge">Store: v{storeInfo.version}</span>}
             </div>
             <div className="versions">
                 <VersionBlock
@@ -631,7 +884,7 @@ function AppCard({ id, app, onEdit, onNotes, storeVersion }) {
                     data={app.production}
                     onEdit={() => onEdit('production')}
                     onNotes={() => onNotes('production')}
-                    storeVersion={storeVersion} // Pass storeVersion to compare with prod
+                    storeInfo={storeInfo} // Pass storeInfo to compare with prod
                 />
                 <VersionBlock label="Dev" data={app.development} onEdit={() => onEdit('development')} onNotes={() => onNotes('development')} />
             </div>
@@ -639,7 +892,8 @@ function AppCard({ id, app, onEdit, onNotes, storeVersion }) {
     );
 }
 
-function VersionBlock({ label, data, onEdit, onNotes, storeVersion }) {
+function VersionBlock({ label, data, onEdit, onNotes, storeInfo }) {
+    const storeVersion = storeInfo?.version;
     const isNewerInStore = storeVersion && data.version !== '—' && storeVersion !== data.version;
 
     return (
@@ -659,7 +913,7 @@ function VersionBlock({ label, data, onEdit, onNotes, storeVersion }) {
     );
 }
 
-function HistoryList({ releases, onDelete }) {
+function HistoryList({ releases, onDelete, onShowNotes }) {
     const [expandedCategories, setExpandedCategories] = useState({
         'ios-parent': true,
         'ios-partner': true,
@@ -693,6 +947,15 @@ function HistoryList({ releases, onDelete }) {
         'ios-partner': 'iOS Partner App',
         'android-parent': 'Android Parent App',
         'android-partner': 'Android Partner App'
+    };
+
+    const getNotesSnippet = (raw) => {
+        if (!raw) return '';
+        const normalized = String(raw).replace(/\r\n?/g, '\n').trim();
+        if (!normalized) return '';
+        const firstLine = normalized.split('\n').find(Boolean) || '';
+        const max = 80;
+        return firstLine.length > max ? `${firstLine.slice(0, max)}…` : firstLine;
     };
 
     if (releases.length === 0) {
@@ -732,6 +995,19 @@ function HistoryList({ releases, onDelete }) {
                                             {r.environment === 'production' ? 'Prod' : 'Dev'}
                                         </div>
                                         {r.is_breaking && <span className="badge breaking">Breaking</span>}
+                                        {r.notes && (
+                                            <div className="notes-cell" title={getNotesSnippet(r.notes)}>
+                                                {getNotesSnippet(r.notes)}
+                                            </div>
+                                        )}
+                                        {r.notes && (
+                                            <button
+                                                className="btn btn-sm"
+                                                onClick={() => onShowNotes?.(`${categoryNames[appId]} v${r.version} (${r.environment})`, r.notes)}
+                                            >
+                                                Notes
+                                            </button>
+                                        )}
                                         <div className="date-cell">{formatDate(r.released_at)}</div>
                                     </div>
                                 ))}

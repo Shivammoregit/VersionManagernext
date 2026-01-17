@@ -145,6 +145,190 @@ function wrapError(error) {
 
 // =====================================================
 // CORE FUNCTIONS (UNCHANGED)
+function normalizeWhatsNew(raw) {
+    if (raw === undefined || raw === null) return null;
+    let str = String(raw).trim();
+
+    // Remove common headings when they get included in the extracted text.
+    str = str
+        .replace(/^(what[’']s\s+new)\s*:?\s*/i, '')
+        .replace(/^(what[’']s\s+new)\s*:?\s*/i, '')
+        .trim();
+
+    return str.length ? str : null;
+}
+
+function decodeJsonStringLiteral(raw) {
+    if (raw === undefined || raw === null) return null;
+    try {
+        return JSON.parse(`"${String(raw)}"`);
+    } catch {
+        return null;
+    }
+}
+
+function stripHtmlTags(raw) {
+    if (raw === undefined || raw === null) return null;
+    const str = String(raw);
+
+    // Preserve line breaks that are commonly used in release notes.
+    const withBreaks = str.replace(/<br\s*\/?>/gi, '\n');
+    const withoutTags = withBreaks.replace(/<[^>]*>/g, ' ');
+
+    const normalizedNewlines = withoutTags.replace(/\r\n?/g, '\n');
+    const collapsedSpaces = normalizedNewlines.replace(/[ \t\f\v]+/g, ' ');
+    const collapsedNewlines = collapsedSpaces.replace(/\n{3,}/g, '\n\n');
+    const trimmedLines = collapsedNewlines
+        .split('\n')
+        .map(line => line.trim())
+        .join('\n')
+        .trim();
+
+    return trimmedLines.length ? trimmedLines : null;
+}
+
+function extractWhatsNewFromHtml(html) {
+    if (!html || typeof html !== 'string') return null;
+
+    // Preferred: extract from the ds:5 blob where Play Store embeds current "What's New" as field "145".
+    // Example: "145":[null,[null,"Implemented ...\u003cbr\u003e..."]]
+    // Sometimes includes an extra null: "145":[null,[null,null,"..."]]
+    {
+        const match = html.match(/"145"\s*:\s*\[\s*null\s*,\s*\[\s*null\s*,\s*(?:null\s*,\s*)?"((?:\\.|[^"\\])*)"\s*\]\s*\]/);
+        if (match) {
+            const decoded = decodeJsonStringLiteral(match[1]);
+            const cleaned = stripHtmlTags(decoded ?? match[1]);
+            const normalized = normalizeWhatsNew(cleaned);
+            if (normalized && isLikelyReleaseNotes(normalized)) return normalized;
+        }
+    }
+
+    // Most common: JSON field embedded in the page.
+    const jsonStringPatterns = [
+        /"recentChanges"\s*:\s*"((?:\\.|[^"\\])*)"/i,
+        /"recentChangesHtml"\s*:\s*"((?:\\.|[^"\\])*)"/i,
+    ];
+
+    for (const pattern of jsonStringPatterns) {
+        const match = html.match(pattern);
+        if (!match) continue;
+
+        const decoded = decodeJsonStringLiteral(match[1]);
+        const cleaned = stripHtmlTags(decoded ?? match[1]);
+        const normalized = normalizeWhatsNew(cleaned);
+        if (normalized && isLikelyReleaseNotes(normalized)) return normalized;
+    }
+
+    function scoreCandidate(text) {
+        const t = String(text || '');
+        let score = 0;
+
+        const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+        const digitCount = (t.match(/\d/g) || []).length;
+        const commaCount = (t.match(/,/g) || []).length;
+        const hasBullets = /(^|\n)\s*([•\u2022\-*]\s+)/.test(t);
+        const keywordHit = /(bug|fix|fixed|improv|improve|improved|perform|performance|update|updated|new|feature|cach|refine|design|ui|crash|stability|optimi)/i.test(t);
+        const addressHit = /(address|road|rd\.|street|st\.|suite|building|floor|block|pincode|pin code|postal|zip|zipcode|city|state|country)/i.test(t);
+        const contactHit = /(developer contact|contact|email|website|privacy policy|terms|support|customer care)/i.test(t);
+        const base64ish = !/\s/.test(t) && /^[A-Za-z0-9+/_=-]{60,}$/.test(t);
+
+        if (t.length >= 25) score += 1;
+        if (t.length >= 80) score += 1;
+        if (t.length > 2200) score -= 3;
+
+        if (lines.length >= 2) score += 2;
+        if (lines.length >= 4) score += 1;
+        if (hasBullets) score += 3;
+        if (keywordHit) score += 3;
+
+        if (base64ish) score -= 10;
+        if (digitCount >= 20) score -= 4;
+        if (commaCount >= 8) score -= 2;
+        if (addressHit) score -= 6;
+        if (contactHit) score -= 6;
+
+        if (/[•\u2022]/.test(t)) score += 2;
+        if (/(bug|fix|improv|perform|update|new|feature)/i.test(t)) score += 1;
+        if (/(privacy|policy|terms|google play|developer contact)/i.test(t)) score -= 2;
+        if (/https?:\/\//i.test(t)) score -= 2;
+        return score;
+    }
+
+    function pickBestCandidateFromText(text) {
+        let best = null;
+        let bestScore = -Infinity;
+
+        const matches = String(text).matchAll(/"((?:\\.|[^"\\]){20,5000})"/g);
+        for (const match of matches) {
+            const decoded = decodeJsonStringLiteral(match[1]);
+            const cleaned = stripHtmlTags(decoded ?? match[1]);
+            const normalized = normalizeWhatsNew(cleaned);
+            if (!normalized) continue;
+            if (normalized.length > 2200) continue;
+            if (!isLikelyReleaseNotes(normalized)) continue;
+
+            const score = scoreCandidate(normalized);
+            if (score > bestScore) {
+                bestScore = score;
+                best = normalized;
+            }
+        }
+
+        return bestScore >= 5 ? best : null;
+    }
+
+    // Try looking near the visible "What's new" label for an embedded encoded string.
+    const whatsNewLabelIdx = html.search(/what[’']s\s+new/i);
+    if (whatsNewLabelIdx >= 0) {
+        const window = html.slice(whatsNewLabelIdx, whatsNewLabelIdx + 25000);
+        const candidate = pickBestCandidateFromText(window);
+        if (candidate) return candidate;
+
+        // Fallback: extract plain text after the label until the next obvious section.
+        const afterLabel = window.replace(/^[\s\S]*?what[’']s\s+new/i, '');
+        const textAfterLabel = stripHtmlTags(afterLabel);
+        if (textAfterLabel) {
+            const cutoffIdx = textAfterLabel.search(/updated on|ratings|developer contact|flag as inappropriate/i);
+            const slice = cutoffIdx >= 0 ? textAfterLabel.slice(0, cutoffIdx) : textAfterLabel;
+            const normalized = normalizeWhatsNew(slice);
+            if (normalized && normalized.length <= 2000 && isLikelyReleaseNotes(normalized)) return normalized;
+        }
+    }
+
+    // Last resort: look through AF_initDataCallback blobs for a plausible long-form note string.
+    // This is intentionally heuristic-based so it keeps working across Play Store UI changes.
+    const blobMatches = html.matchAll(/AF_initDataCallback\(\{key:\s*'([^']+)'[\s\S]*?data:([\s\S]*?),\s*sideChannel:/g);
+    for (const blob of blobMatches) {
+        const dataStr = blob[2];
+        const candidate = pickBestCandidateFromText(dataStr);
+        if (candidate) return candidate;
+    }
+
+    return null;
+}
+
+function isLikelyReleaseNotes(raw) {
+    if (raw === undefined || raw === null) return false;
+    const t = String(raw).trim();
+    if (!t) return false;
+    if (t.length > 2500) return false;
+
+    const base64ish = !/\s/.test(t) && /^[A-Za-z0-9+/_=-]{60,}$/.test(t);
+    if (base64ish) return false;
+
+    const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+    const hasBullets = /(^|\n)\s*([•\u2022\-*]\s+)/.test(t);
+    const keywordHit = /(bug|fix|fixed|improv|improve|improved|perform|performance|update|updated|new|feature|cach|refine|design|ui|crash|stability|optimi)/i.test(t);
+    const digitCount = (t.match(/\d/g) || []).length;
+
+    const addressOrContact = /(address|developer contact|contact|email|website|privacy policy|terms|support|customer care|road|rd\.|street|st\.|suite|building|floor|block|pincode|pin code|postal|zip|zipcode)/i.test(t);
+    if (addressOrContact) return false;
+
+    if (digitCount >= 18 && !keywordHit && !hasBullets) return false;
+
+    return keywordHit || (hasBullets && lines.length >= 2) || lines.length >= 3 || (lines.length >= 2 && t.length >= 20);
+}
+
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -182,8 +366,8 @@ export class PlayStoreScraper {
         this.timeout = options.timeout || config.requestTimeout;
         this.maxRetries = options.maxRetries ?? config.maxRetries;
         this.retryBaseDelay = options.retryBaseDelay || config.retryBaseDelay;
-        this.country = options.country || 'us';
-        this.language = options.language || 'en';
+        this.country = options.country || process.env.PLAYSTORE_COUNTRY || 'in';
+        this.language = options.language || process.env.PLAYSTORE_LANGUAGE || 'en';
 
         this.startedAt = Date.now();
         this.requestCount = 0;
@@ -233,7 +417,26 @@ export class PlayStoreScraper {
                     title: appData.title || null,
                     developer: appData.developer || null,
                     installs: appData.installs || null,
+                    whatsNew: (() => {
+                        const candidate = normalizeWhatsNew(appData.recentChanges);
+                        return candidate && isLikelyReleaseNotes(candidate) ? candidate : null;
+                    })(),
                 };
+
+                // If the primary scraper didn't return "What's New", try a lightweight HTML fallback to fetch it.
+                if (!versionInfo.whatsNew) {
+                    try {
+                        const fallbackWhatsNew = await this.fetchWhatsNewFallback(packageId);
+                        if (fallbackWhatsNew && isLikelyReleaseNotes(fallbackWhatsNew)) {
+                            versionInfo.whatsNew = fallbackWhatsNew;
+                        }
+                    } catch (whatsNewError) {
+                        logger.debug('WhatsNew fallback failed', {
+                            packageId,
+                            error: whatsNewError?.message || String(whatsNewError),
+                        });
+                    }
+                }
 
                 // If the library couldn't extract the version (or returns a non-useful value), try our fallback.
                 if (!appData.version || versionInfo.version === 'Unknown' || versionInfo.version === 'Varies with device') {
@@ -244,6 +447,7 @@ export class PlayStoreScraper {
                     try {
                         const fallback = await this.fetchFallback(packageId);
                         if (fallback?.version && fallback.version !== 'Unknown') {
+                            const mergedWhatsNew = fallback.whatsNew ?? versionInfo.whatsNew;
                             return {
                                 ...versionInfo,
                                 ...fallback,
@@ -251,6 +455,7 @@ export class PlayStoreScraper {
                                 installs: versionInfo.installs,
                                 title: fallback.title ?? versionInfo.title,
                                 developer: fallback.developer ?? versionInfo.developer,
+                                whatsNew: mergedWhatsNew,
                             };
                         }
                     } catch (fallbackError) {
@@ -309,6 +514,47 @@ export class PlayStoreScraper {
         }
 
         throw wrapError(lastError || new Error('Unknown error'));
+    }
+
+    /**
+     * Fetch only "What's New" via HTML (used when primary scraper doesn't provide it).
+     * @private
+     */
+    async fetchWhatsNewFallback(packageId) {
+        const country = String(this.country || 'us').toLowerCase();
+        const language = String(this.language || 'en').toLowerCase();
+        const url = `https://play.google.com/store/apps/details?id=${packageId}&hl=${encodeURIComponent(language)}&gl=${encodeURIComponent(country)}`;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+        try {
+            await this.rateLimiter.consume('playstore');
+
+            const response = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                },
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new Error(`WhatsNew fallback HTTP error! status: ${response.status}`);
+            }
+
+            const html = await response.text();
+            if (/unusual\s+traffic|automated\s+queries|\/sorry\//i.test(html)) {
+                throw new Error('Play Store returned an anti-bot/interstitial page');
+            }
+
+            return extractWhatsNewFromHtml(html);
+        } catch (error) {
+            clearTimeout(timeoutId);
+            throw wrapError(error);
+        }
     }
 
     /**
@@ -408,6 +654,8 @@ export class PlayStoreScraper {
             const dateMatch = html.match(/[A-Z][a-z]{2}\s\d{1,2},\s202\d/);
             const lastUpdated = dateMatch ? new Date(dateMatch[0]).toISOString() : null;
 
+            const whatsNew = extractWhatsNewFromHtml(html);
+
             logger.info('Fallback fetch successful', { packageId, version, title });
 
             return {
@@ -419,6 +667,7 @@ export class PlayStoreScraper {
                 title,
                 developer,
                 isFallback: true,
+                whatsNew,
             };
 
         } catch (error) {
@@ -434,11 +683,38 @@ export class PlayStoreScraper {
 
         const cacheKey = this.getCacheKey(sanitizedId);
         try {
-            const cached = await this.cache.get(cacheKey);
+            let cached = await this.cache.get(cacheKey);
 
             if (cached) {
                 logger.debug('Cache hit', { packageId: sanitizedId });
                 emitMonitoringEvent('cacheHit', { packageId: sanitizedId });
+
+                const cachedWhatsNew = typeof cached.whatsNew === 'string' ? cached.whatsNew.trim() : '';
+                const cachedNotesAreBad = cachedWhatsNew && !isLikelyReleaseNotes(cachedWhatsNew);
+                if (cachedNotesAreBad) {
+                    cached = { ...cached, whatsNew: null };
+                }
+
+                if ((cachedNotesAreBad || !cachedWhatsNew) && cached?.version && cached.version !== 'Unknown') {
+                    try {
+                        const backfilled = await this.fetchWhatsNewFallback(sanitizedId);
+                        if (backfilled && isLikelyReleaseNotes(backfilled)) {
+                            cached = {
+                                ...cached,
+                                whatsNew: backfilled,
+                            };
+                            await this.cache.set(cacheKey, {
+                                ...cached,
+                                cacheExpiresAt: cached.cacheExpiresAt ?? (Date.now() + config.cacheTTL),
+                            });
+                        }
+                    } catch (e) {
+                        logger.debug('Cache whatsNew backfill failed', {
+                            packageId: sanitizedId,
+                            error: e?.message || String(e),
+                        });
+                    }
+                }
 
                 const cacheExpiresIn = cached.cacheExpiresAt
                     ? Math.max(0, Math.floor((cached.cacheExpiresAt - Date.now()) / 1000))
@@ -586,4 +862,12 @@ export default {
     setDefaultScraper,
     getVersion,
     refreshVersion,
+};
+
+// Test-only hooks (not part of the public module surface).
+export const __test__ = {
+    extractWhatsNewFromHtml,
+    normalizeWhatsNew,
+    stripHtmlTags,
+    isLikelyReleaseNotes,
 };

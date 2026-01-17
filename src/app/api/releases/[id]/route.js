@@ -11,15 +11,25 @@ export async function PUT(request, { params }) {
 
         const { version, build, notes, is_breaking } = body;
 
+        const existing = await db.collection('releases').findOne({ _id: new ObjectId(id) });
+        if (!existing) {
+            return NextResponse.json({ error: 'Release not found' }, { status: 404 });
+        }
+
+        const shouldBumpReleaseDate = existing.version !== version || existing.build !== build;
+        const updateDoc = {
+            version,
+            build,
+            notes: notes || '',
+            is_breaking: is_breaking || false,
+            ...(shouldBumpReleaseDate ? { released_at: new Date() } : {}),
+        };
+
         const result = await db.collection('releases').updateOne(
             { _id: new ObjectId(id) },
             {
                 $set: {
-                    version,
-                    build,
-                    notes: notes || '',
-                    is_breaking: is_breaking || false,
-                    released_at: new Date()
+                    ...updateDoc,
                 }
             }
         );

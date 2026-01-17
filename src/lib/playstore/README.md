@@ -5,6 +5,7 @@ A secure, production-ready module for fetching Android app version information f
 ## Features
 
 - ✅ Fetch current app version from Play Store
+- ✅ Fetch "What's New" (release notes) when available
 - ✅ Configurable caching with 1-hour default TTL
 - ✅ Sliding window rate limiting (10 req/min default)
 - ✅ Exponential backoff retry logic
@@ -65,6 +66,7 @@ curl http://localhost:3000/api/playstore/com.google.android.apps.maps
     "version": "11.58.0",
     "lastUpdated": "2024-01-10T00:00:00.000Z",
     "fetchedAt": "2024-01-12T09:51:10.000Z",
+    "whatsNew": "Bug fixes and performance improvements.",
     "fromCache": true,
     "cacheExpiresIn": 3542
   }

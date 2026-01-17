@@ -1,25 +1,25 @@
 /**
- * Sync Play Store versions into MongoDB.
+ * Sync App Store versions into MongoDB.
  *
- * This endpoint fetches the latest Play Store versions for PetYosa and VetYosa
+ * This endpoint fetches the latest App Store versions for PetYosa and VetYosa
  * and updates the `releases` collection (production) when the version changes.
  *
  * Auth (optional):
- * - If PLAYSTORE_API_KEY is set, require it via header (PLAYSTORE_API_KEY_HEADER, default x-api-key)
+ * - If APPSTORE_API_KEY is set, require it via header (APPSTORE_API_KEY_HEADER, default x-api-key)
  *   or via query param `?key=...` (useful for cron services).
  */
 
 import clientPromise from '@/lib/mongodb';
-import { getDefaultScraper } from '@/lib/playstore';
+import { getDefaultAppStoreScraper } from '@/lib/appstore';
 import { NextResponse } from 'next/server';
 
 const TARGETS = [
-    { packageId: 'com.petyosa.petapp', app_id: 'android-parent', buildPrefix: 102 },
-    { packageId: 'com.petyosa.vetapp', app_id: 'android-partner', buildPrefix: 203 },
+    { appStoreId: '6756305494', app_id: 'ios-parent', buildPrefix: 102 },
+    { appStoreId: '6756630090', app_id: 'ios-partner', buildPrefix: 203 },
 ];
 
 function getProvidedApiKey(request) {
-    const headerName = process.env.PLAYSTORE_API_KEY_HEADER || 'x-api-key';
+    const headerName = process.env.APPSTORE_API_KEY_HEADER || 'x-api-key';
     const fromHeader = request.headers.get(headerName);
     if (fromHeader) return fromHeader;
 
@@ -32,7 +32,7 @@ function getProvidedApiKey(request) {
 }
 
 function ensureAuthorized(request) {
-    const expected = process.env.PLAYSTORE_API_KEY;
+    const expected = process.env.APPSTORE_API_KEY;
     if (!expected) return null;
 
     const provided = getProvidedApiKey(request);
@@ -64,14 +64,8 @@ function calculateBuildNumber(version, buildPrefix) {
     return String((buildPrefix * 1000) + (major * 1000) + (minor * 10) + patch);
 }
 
-function looksLikeOpaqueToken(str) {
-    if (!str) return false;
-    const s = String(str).trim();
-    return !/\s/.test(s) && /^[A-Za-z0-9+/_=-]{60,}$/.test(s);
-}
-
 async function runSync() {
-    const scraper = getDefaultScraper();
+    const scraper = getDefaultAppStoreScraper();
     const client = await clientPromise;
     const db = client.db();
 
@@ -81,7 +75,7 @@ async function runSync() {
         const startedAt = new Date().toISOString();
 
         try {
-            const versionInfo = await scraper.refreshVersion(target.packageId);
+            const versionInfo = await scraper.getVersionByAppId(target.appStoreId);
             const storeVersion = versionInfo?.version;
 
             if (!storeVersion || storeVersion === 'Unknown') {
@@ -113,12 +107,9 @@ async function runSync() {
                 environment,
             });
 
-            let nextNotes = typeof versionInfo?.whatsNew === 'string'
+            const nextNotes = typeof versionInfo?.whatsNew === 'string'
                 ? versionInfo.whatsNew.trim()
                 : '';
-            if (looksLikeOpaqueToken(nextNotes)) nextNotes = '';
-
-            const existingNotes = typeof existing?.notes === 'string' ? existing.notes.trim() : '';
 
             if (existing?.version === storeVersion) {
                 if (nextNotes && nextNotes !== String(existing.notes || '').trim()) {
@@ -130,22 +121,6 @@ async function runSync() {
                         ...target,
                         startedAt,
                         status: 'notes_updated',
-                        storeVersion,
-                        build,
-                        previousVersion: existing.version,
-                    });
-                    continue;
-                }
-
-                if (!nextNotes && looksLikeOpaqueToken(existingNotes)) {
-                    await db.collection('releases').updateOne(
-                        { _id: existing._id },
-                        { $set: { notes: 'Auto-synced from Play Store' } }
-                    );
-                    results.push({
-                        ...target,
-                        startedAt,
-                        status: 'notes_cleaned',
                         storeVersion,
                         build,
                         previousVersion: existing.version,
@@ -168,7 +143,7 @@ async function runSync() {
                 version: storeVersion,
                 build,
                 environment,
-                notes: nextNotes || 'Auto-synced from Play Store',
+                notes: nextNotes || 'Auto-synced from App Store',
                 is_breaking: false,
                 released_at: new Date(),
             };
@@ -237,13 +212,13 @@ export async function POST(request) {
     return NextResponse.json({ success: true, data });
 }
 
-export async function OPTIONS(request) {
+export async function OPTIONS() {
     return new NextResponse(null, {
         status: 204,
         headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': `Content-Type, ${process.env.PLAYSTORE_API_KEY_HEADER || 'x-api-key'}`,
+            'Access-Control-Allow-Headers': `Content-Type, ${process.env.APPSTORE_API_KEY_HEADER || 'x-api-key'}`,
             'Access-Control-Max-Age': '86400',
         },
     });
